@@ -1,0 +1,19 @@
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual environment
+.venv/
+venv/
+ENV/
+
+# Large datasets & local configurations
+landmarks.csv
+archive/
+console.py
+.DS_Store
+
+# Streamlit local configurations
+.streamlit/config.toml
