@@ -8,3 +8,4 @@ gTTS
 streamlit-webrtc
 av
 scikit-learn
+google-generativeai

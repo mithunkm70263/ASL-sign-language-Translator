@@ -14,6 +14,7 @@ from mediapipe.python.solutions.hands import HAND_CONNECTIONS as _MP_HAND_CONNEC
 import numpy as np
 import joblib
 from groq import Groq
+import google.generativeai as genai
 from gtts import gTTS
 import tempfile
 import time
@@ -133,25 +134,40 @@ def load_assets():
 model, labels = load_assets()
 
 
-# --- GET GROQ API KEY ---
+# --- GET GROQ & GEMINI API KEYS ---
 groq_api_key = None
+gemini_api_key = None
+
 try:
     if "GROQ_API_KEY" in st.secrets:
         groq_api_key = st.secrets["GROQ_API_KEY"]
+    if "GEMINI_API_KEY" in st.secrets:
+        gemini_api_key = st.secrets["GEMINI_API_KEY"]
 except Exception:
     pass
 
-if not groq_api_key:
+if not groq_api_key or not gemini_api_key:
     try:
-        from console import groq_api
-        groq_api_key = groq_api
+        from console import groq_api, gemini_api
+        if not groq_api_key:
+            groq_api_key = groq_api
+        if not gemini_api_key:
+            gemini_api_key = gemini_api
     except ImportError:
+        pass
+    except AttributeError:
         pass
 
 if groq_api_key:
     groq_client = Groq(api_key=groq_api_key)
 else:
     groq_client = None
+
+if gemini_api_key:
+    genai.configure(api_key=gemini_api_key)
+    gemini_model = genai.GenerativeModel('gemini-1.5-flash')
+else:
+    gemini_model = None
 
 
 # --- MEDIAPIPE FEATURES PIPELINE ---
@@ -645,36 +661,49 @@ with col_control:
             st.warning("Please sign a word or sentence first!")
         else:
             with st.spinner("AI is reconstructing sentence..."):
+                translation_success = False
+                system_prompt = \"\"\"You are an legendary, ultra-intelligent AI communication assistant translating raw fingerspelled ASL text for a deaf or speech-impaired user.
+The input is highly corrupted text generated live from a sign-recognition computer vision model. It has letter repetitions, missing vowels, visual spelling typos, and no punctuation.
+Your absolute core mission:
+- Deduplicate repeated letters and correct visual/spelling typos contextually.
+- Intelligently reconstruct the complete, highly natural, beautifully polished spoken English message.
+- Maintain the user's intent. If they signed shorthand like "GD MRNG", output "Good morning."
+- Return ONLY the final clean sentence. NEVER write any introduction, explanation, quotes, or meta-commentary.\"\"\"
+
+                # Try Groq API First
                 if groq_client:
                     try:
                         response = groq_client.chat.completions.create(
                             model="llama-3.1-8b-instant",
                             messages=[
-                                {
-                                    "role": "system",
-                                    "content": """You are an legendary, ultra-intelligent AI communication assistant translating raw fingerspelled ASL text for a deaf or speech-impaired user.
-
-The input is highly corrupted text generated live from a sign-recognition computer vision model. It has letter repetitions, missing vowels, visual spelling typos, and no punctuation.
-
-Your absolute core mission:
-- Deduplicate repeated letters and correct visual/spelling typos contextually.
-- Intelligently reconstruct the complete, highly natural, beautifully polished spoken English message.
-- Maintain the user's intent. If they signed shorthand like "GD MRNG", output "Good morning."
-- Return ONLY the final clean sentence. NEVER write any introduction, explanation, quotes, or meta-commentary."""
-                                },
-                                {
-                                    "role": "user",
-                                    "content": full_text
-                                }
+                                {"role": "system", "content": system_prompt},
+                                {"role": "user", "content": full_text}
                             ],
                             temperature=0.25,
                             max_tokens=128
                         )
                         st.session_state.groq_output = response.choices[0].message.content.strip()
+                        translation_success = True
                     except Exception as e:
-                        st.error(f"Groq API error: {e}")
-                        st.session_state.groq_output = full_text
-                else:
+                        st.warning(f"Groq API failed. Falling back to Gemini... ({e})")
+                
+                # Fallback to Gemini if Groq failed or is not available
+                if not translation_success and gemini_model:
+                    try:
+                        response = gemini_model.generate_content(
+                            f"{system_prompt}\n\nUSER INPUT: {full_text}",
+                            generation_config=genai.types.GenerationConfig(
+                                temperature=0.25,
+                                max_output_tokens=128,
+                            )
+                        )
+                        st.session_state.groq_output = response.text.strip()
+                        translation_success = True
+                    except Exception as e:
+                        st.error(f"Gemini API failed as well: {e}")
+                
+                # If both failed or neither are configured
+                if not translation_success:
                     st.session_state.groq_output = full_text
                 
                 # Speak via gTTS
