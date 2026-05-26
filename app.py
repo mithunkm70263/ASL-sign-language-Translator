@@ -5,7 +5,42 @@ os.environ["MEDIAPIPE_DISABLE_GPU"] = "1"
 
 APP_DIR = Path(__file__).resolve().parent
 
+import tomllib
+
 import streamlit as st
+
+# IMPORTANT: `st.set_page_config` must be the first Streamlit command.
+st.set_page_config(
+    page_title="ASL Sign Language Translator",
+    page_icon="🤟",
+    layout="wide",
+    initial_sidebar_state="collapsed",
+)
+
+def _load_secrets_dict() -> dict:
+    """
+    Read secrets.toml from common locations without touching `st.secrets`.
+
+    This avoids hard crashes when no secrets are configured (common on HF).
+    """
+    candidate_paths = [
+        APP_DIR / ".streamlit" / "secrets.toml",
+        Path.home() / ".streamlit" / "secrets.toml",
+        Path("/root/.streamlit/secrets.toml"),
+        Path("/app/.streamlit/secrets.toml"),
+    ]
+    for p in candidate_paths:
+        if p.is_file():
+            try:
+                with open(p, "rb") as f:
+                    return tomllib.load(f)
+            except Exception:
+                return {}
+    return {}
+
+
+SECRETS = _load_secrets_dict()
+
 import cv2
 import mediapipe as mp
 from mediapipe.tasks import python as mp_python
@@ -48,12 +83,8 @@ def get_ice_servers():
     account_sid = os.environ.get("TWILIO_ACCOUNT_SID")
     auth_token = os.environ.get("TWILIO_AUTH_TOKEN")
     
-    try:
-        if not account_sid and "TWILIO_ACCOUNT_SID" in st.secrets:
-            account_sid = st.secrets["TWILIO_ACCOUNT_SID"]
-            auth_token = st.secrets["TWILIO_AUTH_TOKEN"]
-    except Exception:
-        pass
+    account_sid = account_sid or SECRETS.get("TWILIO_ACCOUNT_SID")
+    auth_token = auth_token or SECRETS.get("TWILIO_AUTH_TOKEN")
 
     if account_sid and auth_token:
         try:
@@ -80,12 +111,6 @@ MEDIA_STREAM_CONSTRAINTS = {
 }
 
 # --- STYLING & PREMIUM CUSTOM THEME ---
-st.set_page_config(
-    page_title="ASL Sign Language Translator",
-    page_icon="🤟",
-    layout="wide",
-    initial_sidebar_state="collapsed"
-)
 
 # Custom premium CSS for a dark mode interface with glowing cards and micro-animations
 st.markdown("""
@@ -181,15 +206,33 @@ if "last_action" not in st.session_state:
 # --- LOAD ASL MODEL & LABELS ---
 @st.cache_resource
 def load_assets():
-    model_path = APP_DIR / "asl_model.pkl"
-    labels_path = APP_DIR / "labels.pkl"
-    try:
-        model = joblib.load(model_path)
-        labels = joblib.load(labels_path)
-        return model, labels
-    except Exception as e:
-        st.error(f"Error loading model assets: {e}")
-        return None, None
+    # Prefer the known-good assets from `asl-sign-translator/`.
+    asset_roots = [
+        APP_DIR,  # local/HF variants
+        APP_DIR / "asl-sign-translator",
+        APP_DIR / "models",
+    ]
+
+    last_err = None
+    for root in asset_roots:
+        model_path = root / "asl_model.pkl"
+        labels_path = root / "labels.pkl"
+        if not (model_path.is_file() and labels_path.is_file()):
+            continue
+
+        try:
+            model = joblib.load(model_path)
+            labels = joblib.load(labels_path)
+            if model is None or labels is None:
+                continue
+            return model, labels
+        except Exception as e:
+            last_err = e
+            # Try other asset roots (the repo sometimes has placeholder/LFS pointer files).
+            continue
+
+    st.error(f"Error loading model assets (tried multiple paths). Last error: {last_err}")
+    return None, None
 
 model, labels = load_assets()
 if model is None or labels is None:
@@ -210,7 +253,7 @@ _model_ready = threading.Event()
 def _ensure_hand_model_file() -> str:
     """Download .task file once — plain Python (safe inside WebRTC worker thread)."""
     model_path = APP_DIR / "hand_landmarker.task"
-    if not model_path.is_file():
+    if not model_path.is_file() or model_path.stat().st_size < 1000000:
         import urllib.request
         urllib.request.urlretrieve(_HAND_MODEL_URL, model_path)
     return str(model_path)
@@ -247,16 +290,8 @@ threading.Thread(target=_warmup_in_background, daemon=True).start()
 
 
 # --- GET GROQ & GEMINI API KEYS ---
-groq_api_key = os.getenv("GROQ_API_KEY")
-gemini_api_key = os.getenv("GEMINI_API_KEY")
-
-try:
-    if "GROQ_API_KEY" in st.secrets:
-        groq_api_key = groq_api_key or st.secrets["GROQ_API_KEY"]
-    if "GEMINI_API_KEY" in st.secrets:
-        gemini_api_key = gemini_api_key or st.secrets["GEMINI_API_KEY"]
-except Exception:
-    pass
+groq_api_key = os.getenv("GROQ_API_KEY") or SECRETS.get("GROQ_API_KEY")
+gemini_api_key = os.getenv("GEMINI_API_KEY") or SECRETS.get("GEMINI_API_KEY")
 
 if not groq_api_key or not gemini_api_key:
     try:
@@ -640,8 +675,10 @@ class ASLVideoProcessor(VideoProcessorBase):
                 img, self.left_state, self.right_state, self.dominant_hand,
                 self.current_word, self.current_sentence, self.fps, self.hands_detected,
             )
-        except Exception:
-            pass
+        except Exception as e:
+            print("RECV ERROR:", e)
+            import traceback
+            traceback.print_exc()
 
         return av.VideoFrame.from_ndarray(img, format="bgr24")
 
