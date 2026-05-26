@@ -1,11 +1,16 @@
-
 import os
 os.environ["MEDIAPIPE_DISABLE_GPU"] = "1"
-os.environ["MESA_D3D12_DEFAULT_ADAPTER_NAME"] = "Microsoft"
 
 import streamlit as st
 import cv2
+
+# Use explicit import path — bypasses mp.solutions lazy attribute chain
+# which fails on Streamlit Cloud when the solutions subpackage isn't
+# registered as an attribute of the top-level mediapipe module.
 import mediapipe as mp
+from mediapipe.python.solutions.hands import Hands as _MPHands
+from mediapipe.python.solutions.hands import HAND_CONNECTIONS as _MP_HAND_CONNECTIONS
+
 import numpy as np
 import joblib
 from groq import Groq
@@ -399,8 +404,8 @@ class ASLVideoProcessor(VideoProcessorBase):
         self.left_state = HandState()
         self.right_state = HandState()
         
-        # MediaPipe Hands — use pre-loaded module from main thread
-        self.hands = _MP_HANDS.Hands(
+        # MediaPipe Hands — using direct import, no mp.solutions attribute chain
+        self.hands = _MPHands(
             static_image_mode=False,
             max_num_hands=2,
             min_detection_confidence=0.6,
