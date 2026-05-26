@@ -1,5 +1,9 @@
 import os
+from pathlib import Path
+
 os.environ["MEDIAPIPE_DISABLE_GPU"] = "1"
+
+APP_DIR = Path(__file__).resolve().parent
 
 import streamlit as st
 import cv2
@@ -14,10 +18,7 @@ from mediapipe.python.solutions.hands import HAND_CONNECTIONS as _MP_HAND_CONNEC
 import numpy as np
 import joblib
 from groq import Groq
-try:
-    import google.generativeai as genai
-except ImportError:
-    genai = None
+import google.generativeai as genai
 from gtts import gTTS
 import tempfile
 import time
@@ -129,15 +130,19 @@ if "last_action" not in st.session_state:
 # --- LOAD ASL MODEL & LABELS ---
 @st.cache_resource
 def load_assets():
+    model_path = APP_DIR / "asl_model.pkl"
+    labels_path = APP_DIR / "labels.pkl"
     try:
-        model = joblib.load("asl_model.pkl")
-        labels = joblib.load("labels.pkl")
+        model = joblib.load(model_path)
+        labels = joblib.load(labels_path)
         return model, labels
     except Exception as e:
         st.error(f"Error loading model assets: {e}")
         return None, None
 
 model, labels = load_assets()
+if model is None or labels is None:
+    st.stop()
 
 
 # --- GET GROQ & GEMINI API KEYS ---
@@ -169,7 +174,7 @@ if groq_api_key:
 else:
     groq_client = None
 
-if gemini_api_key and genai is not None:
+if gemini_api_key:
     genai.configure(api_key=gemini_api_key)
     gemini_model = genai.GenerativeModel('gemini-1.5-flash')
 else:
@@ -406,6 +411,11 @@ class HandState:
                 self.stable_confidence = ema_conf
 
 
+# Inference resolution — smaller frame = faster on Streamlit Cloud CPUs
+INFER_WIDTH = 640
+INFER_HEIGHT = 480
+
+
 # --- WEBRTC ASL PROCESSING CLASS ---
 class ASLVideoProcessor(VideoProcessorBase):
     def __init__(self):
@@ -450,8 +460,9 @@ class ASLVideoProcessor(VideoProcessorBase):
             self.fps_count = 0
             self.fps_timer = now
             
-        # 4. MediaPipe Processing
-        rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        # 4. MediaPipe on downscaled frame (landmarks are normalized 0–1)
+        infer = cv2.resize(img, (INFER_WIDTH, INFER_HEIGHT), interpolation=cv2.INTER_LINEAR)
+        rgb = cv2.cvtColor(infer, cv2.COLOR_BGR2RGB)
         rgb.flags.writeable = False
         results = self.hands.process(rgb)
         rgb.flags.writeable = True
@@ -540,11 +551,11 @@ with col_cam:
         },
         media_stream_constraints={
             "video": {
-                "width": {"ideal": 1280, "min": 640},
-                "height": {"ideal": 720, "min": 480},
-                "frameRate": {"ideal": 30, "max": 60}
+                "width": {"ideal": 640, "max": 1280},
+                "height": {"ideal": 480, "max": 720},
+                "frameRate": {"ideal": 24, "max": 30},
             },
-            "audio": False
+            "audio": False,
         },
         async_processing=True,
     )
