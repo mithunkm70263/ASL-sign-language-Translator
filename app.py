@@ -65,39 +65,74 @@ import av
 
 @st.cache_resource
 def get_ice_servers():
-    """Use Twilio's TURN servers for robust scaling if credentials are provided."""
-    ice_servers = [
-        {"urls": ["stun:stun.l.google.com:19302"]},
-        {
-            "urls": ["turn:openrelay.metered.ca:80"],
-            "username": "openrelayproject",
-            "credential": "openrelayproject",
-        },
-        {
-            "urls": ["turn:openrelay.metered.ca:443"],
-            "username": "openrelayproject",
-            "credential": "openrelayproject",
-        }
-    ]
-    
-    account_sid = os.environ.get("TWILIO_ACCOUNT_SID")
-    auth_token = os.environ.get("TWILIO_AUTH_TOKEN")
-    
-    account_sid = account_sid or SECRETS.get("TWILIO_ACCOUNT_SID")
-    auth_token = auth_token or SECRETS.get("TWILIO_AUTH_TOKEN")
+    """
+    Build a robust ICE server list that works behind strict NAT / Hugging Face infra.
 
+    Priority order:
+      1. Twilio (best, if credentials supplied as HF Secrets)
+      2. Metered.ca API key (free tier, very reliable)
+      3. Hard-coded multi-server fallback including TCP-443 TURN
+         → TCP port 443 bypasses virtually all corporate firewalls & strict NAT
+    """
+    # ── 1. Twilio (premium, most reliable) ────────────────────────────────────
+    account_sid = os.environ.get("TWILIO_ACCOUNT_SID") or SECRETS.get("TWILIO_ACCOUNT_SID")
+    auth_token  = os.environ.get("TWILIO_AUTH_TOKEN")  or SECRETS.get("TWILIO_AUTH_TOKEN")
     if account_sid and auth_token:
         try:
             from twilio.rest import Client
-            client = Client(account_sid, auth_token)
-            token = client.tokens.create()
+            token = Client(account_sid, auth_token).tokens.create()
             return token.ice_servers
-        except ImportError:
-            st.warning("twilio package not installed. Add 'twilio' to requirements.txt for robust WebRTC.")
         except Exception as e:
-            print(f"Twilio ICE server fetch failed: {e}")
-            
-    return ice_servers
+            print(f"[ICE] Twilio failed: {e}")
+
+    # ── 2. Metered.ca API (free tier, reliable) ───────────────────────────────
+    metered_key = os.environ.get("METERED_API_KEY") or SECRETS.get("METERED_API_KEY")
+    metered_app = os.environ.get("METERED_APP_NAME") or SECRETS.get("METERED_APP_NAME")
+    if metered_key and metered_app:
+        try:
+            resp = httpx.get(
+                f"https://{metered_app}.metered.live/api/v1/turn/credentials",
+                params={"apiKey": metered_key},
+                timeout=5,
+            )
+            resp.raise_for_status()
+            servers = resp.json()
+            if servers:
+                return servers
+        except Exception as e:
+            print(f"[ICE] Metered.ca failed: {e}")
+
+    # ── 3. Robust hard-coded fallback ─────────────────────────────────────────
+    # Includes multiple STUN + TURN servers (UDP & TCP on port 443).
+    # TCP/443 is the most reliable option for Hugging Face Spaces because
+    # it works through corporate firewalls that block all UDP.
+    return [
+        # STUN — multiple providers for redundancy
+        {"urls": ["stun:stun.l.google.com:19302"]},
+        {"urls": ["stun:stun1.l.google.com:19302"]},
+        {"urls": ["stun:stun2.l.google.com:19302"]},
+        {"urls": ["stun:stun3.l.google.com:19302"]},
+        {"urls": ["stun:stun4.l.google.com:19302"]},
+        {"urls": ["stun:stun.relay.metered.ca:80"]},
+        # TURN UDP
+        {
+            "urls": ["turn:global.relay.metered.ca:80"],
+            "username": "e7b69f29de8b2b1ab0f10b2e",
+            "credential": "m3J9RQ5x3xjUzRkn",
+        },
+        # TURN UDP 443 (punches through some firewalls)
+        {
+            "urls": ["turn:global.relay.metered.ca:443"],
+            "username": "e7b69f29de8b2b1ab0f10b2e",
+            "credential": "m3J9RQ5x3xjUzRkn",
+        },
+        # TURN TCP 443 — the most reliable for Hugging Face / strict NAT
+        {
+            "urls": ["turns:global.relay.metered.ca:443?transport=tcp"],
+            "username": "e7b69f29de8b2b1ab0f10b2e",
+            "credential": "m3J9RQ5x3xjUzRkn",
+        },
+    ]
 
 RTC_CONFIGURATION = RTCConfiguration({"iceServers": get_ice_servers()})
 
